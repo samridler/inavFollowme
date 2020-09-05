@@ -1,4 +1,5 @@
-uint16_t rcChannels[12];
+#define RC_CHANNEL_COUNT 18
+uint16_t rcChannels[RC_CHANNEL_COUNT];
 
 #define RC_ROLL       0
 #define RC_PITCH      1
@@ -58,7 +59,7 @@ void exitFollowMeMode() {
 }
 
 void rc_setup() {
-  memset( rcChannels, 0, 12 * sizeof(uint16_t) );
+  memset( rcChannels, 0, RC_CHANNEL_COUNT * sizeof(uint16_t) );
 }
 
 void rc_loop() {

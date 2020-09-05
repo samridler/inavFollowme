@@ -16,7 +16,7 @@ unsigned long lastRequestTime = 0;
 
 #define MSP_SET_WP       209
 
-int whichMsgToRequest = MSP_RAW_GPS;
+uint16_t whichMsgToRequest = MSP_RAW_GPS;
 unsigned long lastWaypointSetTime = 0;
 
 #define FRAMELOC_UPDATE_INTERVAL  20  // ms. requests take turns, so each will be updated at four times this interval
@@ -35,11 +35,12 @@ struct geoloc {
 geoloc frameLoc(0,0,0);
 geoloc tagLoc(0,0,0);
 
-const unsigned char MSP_HEADER[] = { '$', 'M', '>' };
+const unsigned char MSP_HEADER[] = { '$', 'X', '>' };
 
 struct MSP_LOC {
-  uint8_t size;          
-  uint8_t type;          
+  uint8_t flag;          
+  uint16_t type;         
+  uint16_t size;         
   
   uint8_t fixType;       
   uint8_t numSat;        
@@ -52,8 +53,9 @@ struct MSP_LOC {
 };
 
 struct MSP_ATT {
-  uint8_t size;
-  uint8_t type;
+  uint8_t flag;
+  uint16_t type;
+  uint16_t size;
   
   uint16_t roll;
   uint16_t pitch;
@@ -61,18 +63,21 @@ struct MSP_ATT {
 };
 
 struct MSP_RCI {
-  uint8_t size;
-  uint8_t type;
+  uint8_t flag;
+  uint16_t type;
+  uint16_t size;
   
-  uint16_t rcChan[12];
+  uint16_t rcChan[RC_CHANNEL_COUNT];
 };
 
 struct MSP_ALT {
-  uint8_t size;
-  uint8_t type;
+  uint8_t flag;
+  uint16_t type;
+  uint16_t size;
   
   int32_t alt;
   int16_t vario;
+  int32_t altBaro; // barometer
 };
 
 struct MSP_WP {
@@ -109,11 +114,25 @@ void initWaypoint() {
   mspwp.flag = 0;
 }
 
+// crc8_dvb_s2 copied from https://github.com/iNavFlight/inav/wiki/MSP-V2 and modified
+void crc8_dvb_s2(byte *crc_p, byte b) {
+  byte crc = *crc_p;
+  crc ^= b;
+  for (int i = 0; i < 8; ++i) {
+    if (crc & 0x80) {
+      crc = (crc << 1) ^ 0xD5;
+    } else {
+      crc = crc << 1;
+    }
+  }
+  *crc_p = crc;
+}
+
 void mspSerialize8(byte b) {
   msp.write(b);
-  crc ^= b;
+  crc8_dvb_s2(&crc, b);
 }
-void mspSerialize16(int16_t a) {
+void mspSerialize16(uint16_t a) {
   mspSerialize8((a   ) & 0xFF);
   mspSerialize8((a>>8) & 0xFF);
 }
@@ -124,14 +143,14 @@ void mspSerialize32(uint32_t a) {
   mspSerialize8((a>>24) & 0xFF);
 }
 
-byte calcMSPChecksum(int payloadSize) {
-  byte b = 0;
+byte calcMSPChecksum(uint16_t payloadSize) {
+  byte crc = 0;
   //softSerial.print("calcing ");
-  for (int i = 0; i < payloadSize; i++) {
-    b ^= ((byte*)(&mspmsg))[i];
+  for (uint16_t i = 0; i < payloadSize; i++) {
+    crc8_dvb_s2(&crc, ((byte*)(&mspmsg))[i]);
     //softSerial.print(((byte*)(&mspgps))[i]);
   }
-  return b;
+  return crc;
 }
 
 /********************************************************/
@@ -158,12 +177,12 @@ float geoBearing(struct geoloc &a, struct geoloc &b) {
 
 /********************************************************/
 
-boolean processMSP() {
-  static int fpos = 0;
+uint16_t processMSP() {
+  static uint16_t fpos = 0;
   static byte checksum;
   
-  static byte currentMsgType = 0;
-  static int payloadSize = sizeof(MSPMessage);
+  static uint16_t msgType = 0;
+  static uint16_t payloadSize = sizeof(MSPMessage);
   
   while (msp.available()) {
     byte c = msp.read();
@@ -178,28 +197,28 @@ boolean processMSP() {
     else {
       //softSerial.write(c);
       
-      int payloadPos = fpos - 3;
+      uint16_t payloadPos = fpos - 3;
       
       if ( payloadPos < payloadSize )
         ((byte*)(&mspmsg))[payloadPos] = c;
       
-      if ( payloadPos == 1 ) {
-        // We have just received the second byte of the payload, 
-        // so now we can check to see what kind of message it is.
-        if ( c == MSP_RAW_GPS ) {
-          currentMsgType = MSP_RAW_GPS;
+      // ignore flag and payload size in message
+      
+      // get message type
+      if ( payloadPos == 1 )
+        msgType = c;
+      if ( payloadPos == 2 ) {
+        msgType += c << 8;
+        if ( msgType == MSP_RAW_GPS ) {
           payloadSize = sizeof(MSP_LOC);
         }
-        else if ( c == MSP_ATTITUDE ) {
-          currentMsgType = MSP_ATTITUDE;
+        else if ( msgType == MSP_ATTITUDE ) {
           payloadSize = sizeof(MSP_ATT);
         }
-        else if ( c == MSP_ALTITUDE ) {
-          currentMsgType = MSP_ALTITUDE;
+        else if ( msgType == MSP_ALTITUDE ) {
           payloadSize = sizeof(MSP_ALT);
         }
-        else if ( c == MSP_RC ) {
-          currentMsgType = MSP_RC;
+        else if ( msgType == MSP_RC ) {
           payloadSize = sizeof(MSP_RCI);
         }
         else {
@@ -219,7 +238,7 @@ boolean processMSP() {
         softSerial.println(c);*/
         if ( c == checksum ) {
           fpos = 0;
-          return currentMsgType;
+          return msgType;
         }
       }
       else if ( payloadPos > payloadSize ) {
@@ -238,7 +257,7 @@ void msp_setup() {
 
 void msp_loop() {
   
-  int msgType = processMSP();
+  uint16_t msgType = processMSP();
   if ( msgType ) {
     if ( msgType == MSP_RAW_GPS ) {
       currentLat = mspmsg.msploc.lat;
@@ -252,7 +271,7 @@ void msp_loop() {
       currentAlt = mspmsg.mspalt.alt;
     }
     else if ( msgType == MSP_RC ) {
-      memcpy( rcChannels, mspmsg.msprci.rcChan, 12 * sizeof(uint16_t) );
+      memcpy( rcChannels, mspmsg.msprci.rcChan, RC_CHANNEL_COUNT * sizeof(uint16_t) );
       rc_loop();
     }
   }
@@ -263,11 +282,12 @@ void msp_loop() {
   }
   else {
     mspSerialize8('$');
-    mspSerialize8('M');
+    mspSerialize8('X');
     mspSerialize8('<');
     crc = 0;
-    mspSerialize8(0);
-    mspSerialize8(whichMsgToRequest);
+    mspSerialize8(0); // flag, unused
+    mspSerialize16(whichMsgToRequest);
+    mspSerialize16(0);
     msp.write(crc);
     
     crc = 0;
@@ -409,11 +429,12 @@ void msp_loop() {
       }
       
       mspSerialize8('$');
-      mspSerialize8('M');
+      mspSerialize8('X');
       mspSerialize8('<');
       crc = 0;
-      mspSerialize8(21);
-      mspSerialize8(MSP_SET_WP);
+      mspSerialize8(0); // flag, unused
+      mspSerialize16(MSP_SET_WP);
+      mspSerialize16(21);
       
       mspSerialize8(mspwp.wpNo);
       mspSerialize8(mspwp.action);
